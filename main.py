@@ -33,6 +33,7 @@ pairs by cross-multiplication, so no float rounding can split the two graded run
 
 import os
 import sys
+from collections import deque
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor"))
 
@@ -142,13 +143,19 @@ def price_ratio_bps(vq_now, vt_now, vq_then, vt_then):
 class Tape:
     __slots__ = ("created", "creator", "trades", "entries", "last_exit", "dev_buy",
                  "dev_sold", "buyers", "bought", "sold_by_others", "last_trade_slot",
-                 "total_trades")
+                 "total_trades", "rev_hi")
 
     def __init__(self):
         self.created = None
         self.creator = None
         # (slot, is_buy, sol_lamports, user, vq, vt), oldest first
         self.trades = []
+        # Monotonic deque of (slot, vq, vt) with prices strictly decreasing
+        # front to back: the front is always the highest price among the
+        # trades still inside the reversion window. Entries are added as
+        # trades arrive and expire by slot at query time, so the window high
+        # is O(1) instead of a rescan of up to rev_high_window trades.
+        self.rev_hi = deque()
         self.entries = 0
         self.last_exit = -10**12
         self.dev_buy = 0
@@ -325,14 +332,19 @@ def create_on_batch(params=None):
         last = ticks[-1]
         if last[2] is None:
             return None
-        hi_vq = hi_vt = 0
-        for tr in reversed(ticks):
-            if now - tr[0] > p["rev_high_window"]:
-                break
-            if hi_vt == 0 or price_gt(tr[4], tr[5], hi_vq, hi_vt):
-                hi_vq, hi_vt = tr[4], tr[5]
-        if hi_vt == 0:
+        # The window high is the front of the monotonic deque: expire entries
+        # older than rev_high_window slots (same cutoff the rescan used:
+        # it broke at the first trade with now - slot > rev_high_window).
+        # Every entry still in the deque is inside the window, and the front
+        # is the maximum price among them — exactly the high the rescan
+        # computed, with no per-trade cross-multiplication.
+        dq = t.rev_hi
+        w = p["rev_high_window"]
+        while dq and now - dq[0][0] > w:
+            dq.popleft()
+        if not dq:
             return None
+        hi_vq, hi_vt = dq[0][1], dq[0][2]
         dd_bps = -price_ratio_bps(last[4], last[5], hi_vq, hi_vt)
         return (dd_bps, last)
 
@@ -368,6 +380,18 @@ def create_on_batch(params=None):
                 sol_amt = int(e["sol_amount"])
                 t.trades.append((e["slot"], bool(e["is_buy"]), sol_amt, e["user"],
                                  int(e["virtual_quote_reserves"]), int(e["virtual_token_reserves"])))
+                # Keep the sliding-window high current: drop every back entry
+                # the new trade's price dominates (a dominated entry can never
+                # be the window high again — the new entry is newer and at
+                # least as dear, so it outlives it), then append the new trade.
+                # Equal prices are dominated too: the max price is unchanged
+                # either way, and the newer entry expires later.
+                vq = int(e["virtual_quote_reserves"])
+                vt = int(e["virtual_token_reserves"])
+                dq = t.rev_hi
+                while dq and not price_gt(dq[-1][1], dq[-1][2], vq, vt):
+                    dq.pop()
+                dq.append((e["slot"], vq, vt))
                 t.total_trades += 1
                 t.last_trade_slot = e["slot"]
                 is_dev = t.creator is not None and e["user"] == t.creator
