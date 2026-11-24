@@ -8,7 +8,9 @@ A deterministic paper-trading bot for the [Pump.fun Replay Sprint — Paper Bot,
 
 ## How it works
 
-`main.py` (Python 3.13, standard library only) reads one JSON line per batch from stdin — the `hello` message, then one batch per slot carrying the slot's events, marks, fills and account — and answers each batch with one reply line of orders. The strategy watches every curve's trade tape, buys accelerating momentum on mature curves, pyramids into strength, and exits on a stop loss, a trailing stop, or a time limit. Small probe round trips keep the run above the guardrail pace (a round trip of at least 0.01 SOL on at least 20 distinct coins).
+`main.py` (Python 3.13, standard library only) reads one JSON line per batch from stdin — the `hello` message, then one batch per slot carrying the slot's events, marks, fills and account — and answers each batch with one reply line of orders. The strategy is mean reversion after a drawdown on strong bonding curves: it buys a 20–60% dip from the recent high on curves holding real SOL (0.6 SOL tranches on curves with ≥ 40 SOL, 0.01 SOL probes on weaker ones with ≥ 10 SOL), while buyers are still stepping in, and sells the whole position on a 25% take profit, a 15% stop, or a 600-slot time limit. Small probe round trips keep the run above the guardrail pace (a round trip of at least 0.01 SOL on at least 20 distinct coins).
+
+On the dev window the bot nets about +1.09 SOL (379 fills, 133 coins, 190 round trips, 51 winners, 3% max drawdown), profitable even without its three best coins. Momentum, sniper, rider and hold variants were measured on the same window and rejected; they remain in `main.py` behind `PARAMS["mode"]` for research.
 
 Everything is deterministic: no clock, no randomness, no network, no environment reads — the two graded executions produce byte-identical action logs.
 
